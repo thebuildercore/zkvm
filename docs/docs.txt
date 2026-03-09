@@ -1,0 +1,49 @@
+Right there in the middle of the file:
+
+Code snippet
+  %_3 = icmp ugt i32 %price, 100
+  ;; --- FLATTENED BY ZK PASS ---
+  ;; [!] We successfully intercepted the br i1 instruction!
+ successfully executed a compiler interception. into the brain of the Rust compiler, found the exact instruction that causes zkVMs to choke, and ripped it out.
+
+But... if we look closely at the rest of the file, we have a new problem.
+
+The "Ghost" Blocks
+Because our Rust script was just doing a simple "Find and Replace" on the text, we deleted the decision (br i1), but we left the rooms (bb1, bb2, bb3) just sitting there:
+
+Code snippet
+bb2: ; The "Else" room (price <= 100)
+  store i32 9, ptr %result, align 4
+
+bb1: ; The "Then" room (price > 100)
+  store i32 5, ptr %result, align 4
+If we tried to compile this right now, the compiler would crash. It would say: "Wait, you took away my map! How do I know whether to walk into room bb1 or bb2?!"
+
+To make this a true, production-grade ZK optimization, we can't just delete the map. We have to demolish the walls of the rooms entirely and put everything into one straight hallway.
+
+To completely demolish those bb blocks, our script would need to inject actual LLVM math instructions.
+
+
+Instead of jumping to rooms, we force the compiler to evaluate the math. The real LLVM IR we would inject looks like this:
+
+Code snippet
+  ; 1. Get the true/false result (1 or 0) from the comparison
+  %_3 = icmp ugt i32 %price, 100
+  
+  ; 2. Convert that 1-bit boolean into a 32-bit math integer (Zero Extension)
+  %condition_math = zext i1 %_3 to i32
+  
+  ; 3. Calculate the Inverse (1 - condition)
+  %inv_condition = sub i32 1, %condition_math
+  
+  ; 4. Do the Polynomial Multiplication for both paths
+  ; Path A (True) was 5. Path B (False) was 9.
+  %path_a_val = mul i32 %condition_math, 5
+  %path_b_val = mul i32 %inv_condition, 9
+  
+  ; 5. Add them together for the final result
+  %final_result = add i32 %path_a_val, %path_b_val
+  
+  ; 6. Return the result directly (No jumps, no blocks!)
+  ret i32 %final_result
+If we injected that, we could delete bb1, bb2, and bb3 entirely. The zkVM would read this, see zero jumps, perfectly translate mul and add into its native polynomials, and prove it in a fraction of a second.

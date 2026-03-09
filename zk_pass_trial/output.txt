@@ -1,0 +1,8 @@
+x = 10
+;; --- FLATTENED BY ZK PASS ---
+condition_int = x_is_10
+inv_condition = 1 - condition_int
+result = (condition_int * path_a) + (inv_condition * path_b)
+;; ----------------------------
+path_a = 5
+path_b = 9

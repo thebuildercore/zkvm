@@ -1,0 +1,4 @@
+x = 10
+BRANCH x_is_10 THEN path_a ELSE path_b
+path_a = 5
+path_b = 9

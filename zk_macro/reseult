@@ -1,0 +1,52 @@
+akshaya@LAPTOP-7AG4UK0V:~/zkvm/zk_macro$ cargo test
+   Compiling zk_macro v0.1.0 (/home/akshaya/zkvm/zk_macro)
+--------------------------------------------------
+ MATCH FOUND FOR: risk_score
+ MATCH FOUND FOR: health_score
+ INJECTED ZK CIRCUIT:
+fn multi_variable_test(price : u32) -> u32
+{
+    let mut risk_score = 10; let mut health_score = 100; let cond =
+    (price > 500) as u32; let inv_cond = 1 - cond; risk_score =
+    (cond * (risk_score + 50)) + (inv_cond * (risk_score + 5)); health_score =
+    (cond * (health_score - 20)) + (inv_cond * (health_score - 5)); return
+    risk_score;
+}
+--------------------------------------------------
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.56s
+     Running unittests src/lib.rs (target/debug/deps/zk_macro-eceb34c72528e237)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/test_macro.rs (target/debug/deps/test_macro-07c3b72e9eb44a99)
+
+running 1 test
+test test_parallel_logic ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests zk_macro
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+akshaya@LAPTOP-7AG4UK0V:~/zkvm/zk_macro$ 
+
+
+// fuck this worked but only for this test
+fn multi_variable_test(price: u32) -> u32 {
+    let mut risk_score = 10;
+    let mut health_score = 100;
+
+    if price > 500 {
+        risk_score = risk_score + 50;
+        health_score = health_score - 20;
+    } else {
+        risk_score = risk_score + 5;
+        health_score = health_score - 5;
+    }
+    return health_score;
+}
