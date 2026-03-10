@@ -1,28 +1,16 @@
 // version 5 - what is does?
-//Introduces a recursive security scanner that detects and aborts optimization if it finds dangerous side effects like function calls.
-//This version prioritized safety; it realized that you can't multiply a "side effect" by zero, so it returns the original code if the logic is too complex for a pure math circuit.
+// Shifts from simple return values to tracking the state of a single variable (Static Single Assignment) at a fixed position in the code.
 
 // v2 → hardcoded condition
 // v3 → AST extraction of the developer's condition
 // v4 → dynamic condition + dynamic branch value extraction
 // v5 → safety validation of branch expressions before transformation
-    
- extern crate proc_macro;
+// v6 → SSA-style state flattening of variable updates  
+ 
+extern crate proc_macro;
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, ItemFn, Stmt, Expr};
-
-//  THE RADAR: Scans the code tree for dangerous side-effects
-fn is_safe_for_zk(expr: &Expr) -> bool {
-    match expr {
-        Expr::Lit(_) => true,  // Safe: Just a number (e.g., 5)
-        Expr::Path(_) => true, // Safe: Just a variable (e.g., base_fee)
-        Expr::Paren(p) => is_safe_for_zk(&p.expr), // Safe: Math in parentheses
-        Expr::Binary(b) => is_safe_for_zk(&b.left) && is_safe_for_zk(&b.right), // Safe: Math (a * b)
-        //  ANYTHING ELSE (like Expr::Call) IS DANGEROUS!
-        _ => false, 
-    }
-}
+use syn::{parse_macro_input, ItemFn, Stmt, Expr, Pat};
 
 #[proc_macro_attribute]
 pub fn zk_optimize(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -31,46 +19,68 @@ pub fn zk_optimize(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let inputs = &input_fn.sig.inputs;
     let output = &input_fn.sig.output;
 
-    let mut final_code = quote! { #input_fn }; 
-
-    if let Some(Stmt::Expr(Expr::If(if_statement), _)) = input_fn.block.stmts.first() {
-        let dynamic_condition = &if_statement.cond;
-
-        let mut true_expr: Option<&Expr> = None;
-        if let Some(Stmt::Expr(Expr::Return(ret), _)) = if_statement.then_branch.stmts.first() {
-            true_expr = ret.expr.as_deref();
-        }
-
-        let mut false_expr: Option<&Expr> = None;
-        if let Some((_, else_expr)) = &if_statement.else_branch {
-            if let Expr::Block(else_block) = &**else_expr {
-                if let Some(Stmt::Expr(Expr::Return(ret), _)) = else_block.block.stmts.first() {
-                    false_expr = ret.expr.as_deref();
-                }
-            }
-        }
-
-        //  THE SECURITY CHECK
-        if let (Some(t_expr), Some(f_expr)) = (true_expr, false_expr) {
-            
-            // Pass both paths through the Radar...
-            if is_safe_for_zk(t_expr) && is_safe_for_zk(f_expr) {
-                // ALL CLEAR! Inject the ZK Math.
-                final_code = quote! {
-                    fn #fn_name(#inputs) #output {
-                        let condition_bool = #dynamic_condition;
-                        let condition_int = condition_bool as u32;
-                        let inv_condition = 1 - condition_int;
-                        return (condition_int * #t_expr) + (inv_condition * #f_expr);
-                    }
-                };
-            } else {
-                //  RADAR TRIGGERED! A function call or side-effect was detected.
-                // We abort the injection and return the original, safe `if/else` code.
-                println!(" ZK-RADAR ALERT in '{}': Dangerous side-effect detected! Aborting math optimization to protect state.", fn_name);
+    // 1. Capture the initial variable declaration (e.g., let mut risk_score = 10)
+    let mut initial_var_name = quote!{};
+    let mut initial_val = quote!{};
+    
+    if let Some(Stmt::Local(local)) = input_fn.block.stmts.get(0) {
+        if let Pat::Ident(ref id) = local.pat {
+            let var_ident = &id.ident;
+            initial_var_name = quote!(#var_ident);
+            if let Some(init) = &local.init {
+                let expr = &init.expr;
+                initial_val = quote!(#expr);
             }
         }
     }
 
-    TokenStream::from(final_code)
+    // 2. Identify the IF block
+    // In syn 2.0, an expression with a semicolon is Stmt::Expr(expr, Some(semi))
+    if let Some(Stmt::Expr(Expr::If(if_statement), _)) = input_fn.block.stmts.get(1) {
+        let condition = &if_statement.cond;
+
+        // Extract "Path A" logic (The 'Then' branch)
+        let mut path_a_logic = quote!{};
+        if let Some(Stmt::Expr(Expr::Assign(ass), _)) = if_statement.then_branch.stmts.first() {
+            let right = &ass.right;
+            path_a_logic = quote!(#right);
+        }
+
+        // Extract "Path B" logic (The 'Else' branch)
+        let mut path_b_logic = quote!{};
+        if let Some((_, else_expr)) = &if_statement.else_branch {
+            if let Expr::Block(eb) = &**else_expr {
+                if let Some(Stmt::Expr(Expr::Assign(ass), _)) = eb.block.stmts.first() {
+                    let right = &ass.right;
+                    path_b_logic = quote!(#right);
+                }
+            }
+        }
+
+        // 3. THE MASTER FLATTENING: Generate the SSA Polynomial
+        let final_code = quote! {
+            fn #fn_name(#inputs) #output {
+                let mut #initial_var_name = #initial_val;
+
+                // Evaluate condition as a 1 or 0
+                let cond = (#condition) as u32;
+                let inv_cond = 1 - cond;
+
+                // Pre-calculate both possible states
+                // We use scopes here to avoid variable name collisions
+                let val_a = { #path_a_logic };
+                let val_b = { #path_b_logic };
+
+                // The Selection Polynomial (Branchless)
+                #initial_var_name = (cond * val_a) + (inv_cond * val_b);
+
+                return #initial_var_name;
+            }
+        };
+
+        println!(" SSA FLATTENING COMPLETE: Function '{}' is now branchless.", fn_name);
+        return TokenStream::from(final_code);
+    }
+
+    TokenStream::from(quote!{#input_fn})
 }
