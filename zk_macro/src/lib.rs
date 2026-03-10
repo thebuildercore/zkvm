@@ -1,16 +1,27 @@
-// version 5 - what is does?
-// Shifts from simple return values to tracking the state of a single variable (Static Single Assignment) at a fixed position in the code.
+// version 7  - what is does?
+// Uses a "Sniper" function to flawlessly match and flatten multiple parallel state variables across branches, regardless of invisible compiler metadata.
 
 // v2 → hardcoded condition
 // v3 → AST extraction of the developer's condition
 // v4 → dynamic condition + dynamic branch value extraction
 // v5 → safety validation of branch expressions before transformation
 // v6 → SSA-style state flattening of variable updates  
- 
+// v7 → Multi-Variable State Circuit
+
 extern crate proc_macro;
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, ItemFn, Stmt, Expr, Pat};
+use syn::{parse_macro_input, ItemFn, Stmt, Expr};
+
+//  THE SNIPER: Extracts the pure variable name without invisible macro hygiene tags
+fn get_pure_name(expr: &Expr) -> Option<String> {
+    if let Expr::Path(p) = expr {
+        if let Some(seg) = p.path.segments.first() {
+            return Some(seg.ident.to_string());
+        }
+    }
+    None
+}
 
 #[proc_macro_attribute]
 pub fn zk_optimize(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -19,66 +30,83 @@ pub fn zk_optimize(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let inputs = &input_fn.sig.inputs;
     let output = &input_fn.sig.output;
 
-    // 1. Capture the initial variable declaration (e.g., let mut risk_score = 10)
-    let mut initial_var_name = quote!{};
-    let mut initial_val = quote!{};
-    
-    if let Some(Stmt::Local(local)) = input_fn.block.stmts.get(0) {
-        if let Pat::Ident(ref id) = local.pat {
-            let var_ident = &id.ident;
-            initial_var_name = quote!(#var_ident);
-            if let Some(init) = &local.init {
-                let expr = &init.expr;
-                initial_val = quote!(#expr);
-            }
+    let mut setup_stmts = Vec::new();
+    let mut if_stmt_found = None;
+    let mut return_expr = quote! { 0 };
+
+    for stmt in &input_fn.block.stmts {
+        match stmt {
+            Stmt::Local(_) => setup_stmts.push(quote!(#stmt)),
+            Stmt::Expr(Expr::If(i), _) => if_stmt_found = Some(i),
+            Stmt::Expr(Expr::Return(r), _) => {
+                if let Some(e) = &r.expr { return_expr = quote!(#e); }
+            },
+            Stmt::Expr(e, None) => return_expr = quote!(#e),
+            _ => {}
         }
     }
 
-    // 2. Identify the IF block
-    // In syn 2.0, an expression with a semicolon is Stmt::Expr(expr, Some(semi))
-    if let Some(Stmt::Expr(Expr::If(if_statement), _)) = input_fn.block.stmts.get(1) {
+    if let Some(if_statement) = if_stmt_found {
         let condition = &if_statement.cond;
+        let mut updates = Vec::new();
 
-        // Extract "Path A" logic (The 'Then' branch)
-        let mut path_a_logic = quote!{};
-        if let Some(Stmt::Expr(Expr::Assign(ass), _)) = if_statement.then_branch.stmts.first() {
-            let right = &ass.right;
-            path_a_logic = quote!(#right);
-        }
+        println!("--------------------------------------------------");
+        
+        for stmt in &if_statement.then_branch.stmts {
+            let inner_expr = match stmt {
+                Stmt::Expr(e, _) => Some(e),
+                _ => None,
+            };
 
-        // Extract "Path B" logic (The 'Else' branch)
-        let mut path_b_logic = quote!{};
-        if let Some((_, else_expr)) = &if_statement.else_branch {
-            if let Expr::Block(eb) = &**else_expr {
-                if let Some(Stmt::Expr(Expr::Assign(ass), _)) = eb.block.stmts.first() {
-                    let right = &ass.right;
-                    path_b_logic = quote!(#right);
+            if let Some(Expr::Assign(ass)) = inner_expr {
+                let var_name = &ass.left;
+                let path_a_val = &ass.right;
+                
+                // Use the Sniper to get the pure name
+                let pure_var_name = get_pure_name(var_name).unwrap_or_default();
+                
+                let mut path_b_val = quote!(#var_name); // Default fallback
+
+                if let Some((_, else_expr)) = &if_statement.else_branch {
+                    if let Expr::Block(eb) = &**else_expr {
+                        for e_stmt in &eb.block.stmts {
+                            let e_inner = match e_stmt {
+                                Stmt::Expr(e, _) => Some(e),
+                                _ => None,
+                            };
+                            if let Some(Expr::Assign(e_ass)) = e_inner {
+                                // Use the Sniper again for the Else branch
+                                let pure_else_name = get_pure_name(&e_ass.left).unwrap_or_default();
+                                
+                                // Flawless equality check!
+                                if pure_var_name == pure_else_name && !pure_var_name.is_empty() {
+                                    let right_side = &e_ass.right;
+                                    path_b_val = quote!(#right_side);
+                                    println!(" MATCH FOUND FOR: {}", pure_var_name);
+                                }
+                            }
+                        }
+                    }
                 }
+
+                updates.push(quote! {
+                    #var_name = (cond * (#path_a_val)) + (inv_cond * (#path_b_val));
+                });
             }
         }
 
-        // 3. THE MASTER FLATTENING: Generate the SSA Polynomial
         let final_code = quote! {
             fn #fn_name(#inputs) #output {
-                let mut #initial_var_name = #initial_val;
-
-                // Evaluate condition as a 1 or 0
+                #(#setup_stmts)*
                 let cond = (#condition) as u32;
                 let inv_cond = 1 - cond;
-
-                // Pre-calculate both possible states
-                // We use scopes here to avoid variable name collisions
-                let val_a = { #path_a_logic };
-                let val_b = { #path_b_logic };
-
-                // The Selection Polynomial (Branchless)
-                #initial_var_name = (cond * val_a) + (inv_cond * val_b);
-
-                return #initial_var_name;
+                #(#updates)*
+                return #return_expr;
             }
         };
 
-        println!(" SSA FLATTENING COMPLETE: Function '{}' is now branchless.", fn_name);
+        println!(" INJECTED ZK CIRCUIT:\n{}", final_code.to_string());
+        println!("--------------------------------------------------");
         return TokenStream::from(final_code);
     }
 
