@@ -1,48 +1,55 @@
-// version 2 - what is does?
-// Intercept the function at compile time and replace branching if/else logic with a hardcoded branchless 
-// polynomial (cond * A) + (1 - cond) * B to simulate ZK-style multiplexer execution.
+// version 3 - what is does?
+// Intercept the function at compile time, pattern-match the AST to detect `if` statements,
+// extract the developer’s condition dynamically, and inject it into a branchless polynomial template for ZK-style execution.
+
+// v2 → hardcoded condition
+// v3 → AST extraction of the developer's condition
 
 extern crate proc_macro;
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, ItemFn};
+use syn::{parse_macro_input, ItemFn, Stmt, Expr};
 
 #[proc_macro_attribute]
 pub fn zk_optimize(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    // 1. Read the jumpy AST
+    // 1. Read the incoming function
     let input_fn = parse_macro_input!(item as ItemFn);
     let fn_name = &input_fn.sig.ident;
     let inputs = &input_fn.sig.inputs;
     let output = &input_fn.sig.output;
 
-    println!(" INTERCEPTED FUNCTION: '{}'", fn_name);
-    println!(" Destroying Expr::If branches and injecting polynomials...");
+    // We set a fallback: If we don't find an `if` statement, just return the normal code.
+    let mut final_code = quote! { #input_fn }; 
 
-    // 2. We use `quote!` to write brand new Rust code.
-    // We are keeping the function signature, but completely replacing the body 
-    // with the branchless ZK selection math!
-    let new_math_code = quote! {
-        fn #fn_name(#inputs) #output {
-            // Step A: Evaluate the condition (price > 100)
-            let condition_bool = price > 100;
-            
-            // Step B: Turn True/False into 1 or 0
-            let condition_int = condition_bool as u32;
-            
-            // Step C: Calculate the inverse (1 - condition)
-            let inv_condition = 1 - condition_int;
-            
-            // Step D: The Branchless Polynomial! 
-            // Result = (Condition * PathA) + (Inverse * PathB)
-            return (condition_int * 5) + (inv_condition * 9);
-        }
-    };
+    // 2. THE PATTERN MATCH (Opening the Russian Doll)
+    // We check the first line of code inside the function block. 
+    // If it perfectly matches the shape of an `If` statement, we unlock it!
+    if let Some(Stmt::Expr(Expr::If(if_statement), _)) = input_fn.block.stmts.first() {
+        
+        //  WE CAUGHT IT! Extract the exact condition the developer wrote.
+        let dynamic_condition = &if_statement.cond;
 
-    // 3. Print our secret injected code to the terminal so we can see it
-    println!(" INJECTED THIS SECRET CODE INTO THE COMPILER:");
-    println!("{}", new_math_code.to_string());
-    println!("--------------------------------------------------");
+        println!(" Unlocked the AST! Found condition: {}", quote!(#dynamic_condition).to_string());
 
-    // 4. Hand the new, highly optimized math code back to the compiler!
-    TokenStream::from(new_math_code)
-}
+        // 3. THE DYNAMIC INJECTION
+        // We build the new function, injecting the developer's exact logic
+        // into our ZK math template using the `#` hashtag syntax!
+        final_code = quote! {
+            fn #fn_name(#inputs) #output {
+                // Look closely: We are pasting their dynamic condition right here!
+                let condition_bool = #dynamic_condition;
+                let condition_int = condition_bool as u32;
+                let inv_condition = 1 - condition_int;
+                
+                // (For this step, we leave 5 and 9 hardcoded to prove the condition extraction works)
+                return (condition_int * 5) + (inv_condition * 9);
+            }
+        };
+    }
+
+    println!(" INJECTED THIS CODE INTO THE COMPILER:");
+// // //     println!("{}", final_code.to_string());
+// // //     println!("--------------------------------------------------");
+
+// // //     TokenStream::from(final_code)
+// // // }
